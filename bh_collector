@@ -1,0 +1,59 @@
+#!/bin/bash
+set -e
+
+echo -e "\n\033[34m[+] Updating packages and installing dependencies\033[0m"
+sudo apt update
+sudo apt install -y python3 python3-pip python3-venv rustc cargo ldap-utils bloodhound.py gcc clang libclang-dev libgssapi-krb5-2 libkrb5-dev libsasl2-modules-gssapi-mit musl-tools gcc-mingw-w64-x86-64
+
+echo -e "\n\033[34m[+] Installing required security tools\033[0m"
+pip3 install ldapdomaindump --break-system-packages
+export CARGO_HOME=/root/.cargo
+export PATH=$PATH:/root/.cargo/bin
+cargo install rusthound
+
+# Installation verification
+declare -a tools=("bloodhound-python" "rusthound" "ldapdomaindump")
+for tool in "${tools[@]}"; do
+    if ! command -v $tool &> /dev/null; then
+        echo -e "\033[31m[-] Error: $tool installation failed!\033[0m"
+        exit 1
+    fi
+done
+
+echo -e "\n\033[34m[+] Network configuration\033[0m"
+read -p "Enter Domain Controller IP: " dc_ip
+read -p "Enter Domain Controller hostname: " dc_hostname
+
+if ! grep -q "$dc_ip $dc_hostname" /etc/hosts; then
+    echo "$dc_ip $dc_hostname" | sudo tee -a /etc/hosts
+    echo -e "\033[32m[+] Added $dc_ip $dc_hostname to /etc/hosts\033[0m"
+else
+    echo -e "\033[33m[!] Entry already exists in /etc/hosts\033[0m"
+fi
+
+echo -e "\n\033[34m[+] Authentication details\033[0m"
+read -p "Enter domain name (FQDN): " domain
+read -p "Enter username: " username
+read -s -p "Enter password: " password
+echo
+
+output_dir="bloodhound_data_$(date +%Y%m%d_%H%M%S)"
+mkdir -p "$output_dir"
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+NC='\033[0m' # No Color
+
+echo -e "\n${GREEN}[+] Starting Active Directory reconnaissance${NC}"
+
+echo -e "\n${YELLOW}[*] Running BloodHound-python...${NC}"
+bloodhound-python -u "$username" -p "$password" -d "$domain" -dc "$dc_hostname" -ip "$dc_ip" -c All --auth-method ntlm --zip --disable-autogc | tee "$output_dir/bloodhound_python.out"
+
+echo -e "\n${YELLOW}[*] Running RustHound...${NC}"
+rusthound -u "$username" -p "$password" -d "$domain" -dc "$dc_hostname" -i "$dc_ip" -o "$output_dir" --zip --adcs --fqdn-resolver| tee "$output_dir/rusthound.out"
+
+echo -e "\n${YELLOW}[*] Running ldapdomaindump...${NC}"
+ldapdomaindump -u "$domain\\$username" -p "$password" -n "$dc_ip" --no-json --no-grep -o "$output_dir" | tee "$output_dir/ldapdomaindump.out"
+
+echo -e "\n${GREEN}[+] Collection complete. Output saved to: $output_dir${NC}"
