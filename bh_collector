@@ -51,7 +51,6 @@ echo -e "\n${YELLOW}[*] Running BloodHound-python...${NC}"
 bloodhound-python -u "$username" -p "$password" -d "$domain" \
 -c All \
 -ns "$dc_ip" \
---dns-tcp \
 -dc "$dc_hostname" \
 --zip \
 --disable-autogc \
@@ -69,7 +68,6 @@ rusthound \
 -z \
 --adcs \
 --fqdn-resolver \
---dns-tcp \
 | tee "$output_dir/rusthound.out"
 
 echo -e "\n${YELLOW}[*] Running ldapdomaindump...${NC}"
@@ -77,6 +75,5 @@ ldapdomaindump \
 --user "$domain\\$username" \
 --password "$password" \
 -o "$output_dir" \
--n "$dc_ip" \
 "$dc_hostname" \
 | tee "$output_dir/ldapdomaindump.out"
