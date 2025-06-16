@@ -2,7 +2,7 @@
 
 
 
-This repository provides a simple automated Bash script (`bh_scr.sh`) to install and run  Active Directory enumeration tools: **BloodHound-python**, **RustHound**, and **ldapdomaindump**. The script is designed for red team operators, penetration testers, and advanced defenders seeking to understand or audit AD environments.
+This repository provides a simple automated Bash script (`bh_collecotr.sh`) to install and run  Active Directory enumeration tools: **BloodHound-python**, **RustHound**, and **ldapdomaindump**. The script is designed for red team operators, penetration testers, and advanced defenders seeking to understand or audit AD environments.
 
 ## Quick Start
 
