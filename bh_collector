@@ -48,12 +48,35 @@ NC='\033[0m' # No Color
 echo -e "\n${GREEN}[+] Starting Active Directory reconnaissance${NC}"
 
 echo -e "\n${YELLOW}[*] Running BloodHound-python...${NC}"
-bloodhound-python -u "$username" -p "$password" -d "$domain" -dc "$dc_hostname" -ip "$dc_ip" -c All --auth-method ntlm --zip --disable-autogc | tee "$output_dir/bloodhound_python.out"
+bloodhound-python -u "$username" -p "$password" -d "$domain" \
+-c All \
+-ns "$dc_ip" \
+--dns-tcp \
+-dc "$dc_hostname" \
+--zip \
+--disable-autogc \
+--auth-method ntlm \
+| tee "$output_dir/bloodhound_python.out"
 
 echo -e "\n${YELLOW}[*] Running RustHound...${NC}"
-rusthound -u "$username" -p "$password" -d "$domain" -dc "$dc_hostname" -i "$dc_ip" -o "$output_dir" --zip --adcs --fqdn-resolver| tee "$output_dir/rusthound.out"
+rusthound \
+-d "$domain" \
+-u "$username@$domain" \
+-p "$password" \
+-f "$dc_hostname" \
+-i "$dc_ip" \
+-o "$output_dir" \
+-z \
+--adcs \
+--fqdn-resolver \
+--dns-tcp \
+| tee "$output_dir/rusthound.out"
 
 echo -e "\n${YELLOW}[*] Running ldapdomaindump...${NC}"
-ldapdomaindump -u "$domain\\$username" -p "$password" -n "$dc_ip" --no-json --no-grep -o "$output_dir" | tee "$output_dir/ldapdomaindump.out"
-
-echo -e "\n${GREEN}[+] Collection complete. Output saved to: $output_dir${NC}"
+ldapdomaindump \
+--user "$domain\\$username" \
+--password "$password" \
+-o "$output_dir" \
+-n "$dc_ip" \
+"$dc_hostname" \
+| tee "$output_dir/ldapdomaindump.out"
