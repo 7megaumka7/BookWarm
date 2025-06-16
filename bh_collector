@@ -1,37 +1,83 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
-echo -e "\n\033[34m[+] Updating packages and installing dependencies\033[0m"
+# ======================== #
+#   COLOR DEFINITIONS      #
+# ======================== #
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+# ======================== #
+#   DEPENDENCY CHECKS      #
+# ======================== #
+echo -e "${BLUE}\n[+] Updating packages and installing dependencies${NC}"
 sudo apt update
 sudo apt install -y python3 python3-pip python3-venv rustc cargo ldap-utils bloodhound.py gcc clang libclang-dev libgssapi-krb5-2 libkrb5-dev libsasl2-modules-gssapi-mit musl-tools gcc-mingw-w64-x86-64
 
-echo -e "\n\033[34m[+] Installing required security tools\033[0m"
+echo -e "${BLUE}\n[+] Installing required security tools${NC}"
 pip3 install ldapdomaindump --break-system-packages
 export CARGO_HOME=/root/.cargo
 export PATH=$PATH:/root/.cargo/bin
-cargo install rusthound
+cargo install rusthound --locked
 
-# Installation verification
 declare -a tools=("bloodhound-python" "rusthound" "ldapdomaindump")
 for tool in "${tools[@]}"; do
     if ! command -v $tool &> /dev/null; then
-        echo -e "\033[31m[-] Error: $tool installation failed!\033[0m"
+        echo -e "${RED}[-] Error: $tool installation failed!${NC}"
         exit 1
     fi
 done
 
-echo -e "\n\033[34m[+] Network configuration\033[0m"
+# ======================== #
+#   INTERACTIVE INPUT      #
+# ======================== #
+echo -e "${BLUE}\n[+] Network configuration${NC}"
 read -p "Enter Domain Controller IP: " dc_ip
 read -p "Enter Domain Controller hostname: " dc_hostname
 
-if ! grep -q "$dc_ip $dc_hostname" /etc/hosts; then
-    echo "$dc_ip $dc_hostname" | sudo tee -a /etc/hosts
-    echo -e "\033[32m[+] Added $dc_ip $dc_hostname to /etc/hosts\033[0m"
-else
-    echo -e "\033[33m[!] Entry already exists in /etc/hosts\033[0m"
-fi
+# ======================== #
+#   /etc/hosts HANDLING    #
+# ======================== #
+add_etc_hosts_entry() {
+    local ip="$1"
+    local host="$2"
+    # Check for existing entry for this host or IP (exact match)
+    if grep -E "^[[:space:]]*$ip[[:space:]]+$host([[:space:]]|\$)" /etc/hosts &>/dev/null; then
+        echo -e "${YELLOW}[!] /etc/hosts: Entry '$ip $host' already exists.${NC}"
+    else
+        # Remove any lines with the same hostname or IP to avoid duplicates
+        sudo sed -i.bak "/[[:space:]]$host[[:space:]]*$/d" /etc/hosts
+        sudo sed -i.bak "/^$ip[[:space:]]/d" /etc/hosts
+        echo "$ip $host" | sudo tee -a /etc/hosts
+        echo -e "${GREEN}[+] /etc/hosts: Added '$ip $host'${NC}"
+    fi
+}
+add_etc_hosts_entry "$dc_ip" "$dc_hostname"
 
-echo -e "\n\033[34m[+] Authentication details\033[0m"
+# ======================== #
+#   /etc/resolv.conf HANDLING #
+# ======================== #
+add_resolv_conf_nameserver() {
+    local ip="$1"
+    local resolv="/etc/resolv.conf"
+    if grep -E "^[[:space:]]*nameserver[[:space:]]+$ip([[:space:]]|\$)" "$resolv" &>/dev/null; then
+        echo -e "${YELLOW}[!] /etc/resolv.conf: nameserver $ip already exists.${NC}"
+    else
+        # Remove any previous nameserver lines with the same IP to avoid duplicates
+        sudo sed -i.bak "/^nameserver[[:space:]]\+$ip[[:space:]]*$/d" "$resolv"
+        echo "nameserver $ip" | sudo tee -a "$resolv"
+        echo -e "${GREEN}[+] /etc/resolv.conf: Added 'nameserver $ip'${NC}"
+    fi
+}
+add_resolv_conf_nameserver "$dc_ip"
+
+# ======================== #
+#   AUTH INPUT             #
+# ======================== #
+echo -e "${BLUE}\n[+] Authentication details${NC}"
 read -p "Enter domain name (FQDN): " domain
 read -p "Enter username: " username
 read -s -p "Enter password: " password
@@ -40,40 +86,106 @@ echo
 output_dir="bloodhound_data_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$output_dir"
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-NC='\033[0m' # No Color
+# ======================== #
+#   BLOODHOUND-PYTHON      #
+# ======================== #
+try_bloodhound() {
+    local status=1
+    declare -a bh_commands=(
+        "-c All -ns $dc_ip -dc $dc_hostname --zip --disable-autogc --auth-method ntlm"
+        "-c All -ns $dc_ip --dns-tcp --dns-timeout 30 -dc $dc_hostname --zip --disable-autogc --auth-method ntlm"
+        "-c All -ns $dc_ip --use-ldaps -dc $dc_hostname --zip --disable-autogc --auth-method ntlm"
+        "-c All -ns $dc_ip --dns-tcp --dns-timeout 30 --use-ldaps -dc $dc_hostname --zip --disable-autogc --auth-method ntlm"
+        "-c All -ns $dc_ip --dns-tcp --dns-timeout 60 -dc $dc_hostname --zip --disable-autogc --auth-method ntlm --workers 2"
+        "-c DCOnly -ns $dc_ip --dns-tcp -dc $dc_hostname --zip --disable-autogc --auth-method ntlm"
+        "-c All -ns 8.8.8.8 --dns-tcp -dc $dc_hostname --zip --disable-autogc --auth-method ntlm"
+        "-c All -ns $dc_ip --dns-tcp --disable-pooling -dc $dc_hostname --zip --disable-autogc --auth-method ntlm"
+    )
+    for ((i=0; i<${#bh_commands[@]}; i++)); do
+        echo -e "${YELLOW}\n[*] Attempt $((i+1))/${#bh_commands[@]}: bloodhound-python -u '$username' -p '***' -d '$domain' ${bh_commands[$i]}${NC}"
+        if bloodhound-python -u "$username" -p "$password" -d "$domain" ${bh_commands[$i]} | tee "$output_dir/bloodhound_attempt_$((i+1)).out"; then
+            status=0
+            echo -e "${GREEN}[+] BloodHound-python collection succeeded${NC}"
+            break
+        else
+            echo -e "${RED}[!] Attempt $((i+1)) failed${NC}"
+        fi
+        sleep $((i*3+2))
+    done
+    if [ $status -ne 0 ]; then
+        echo -e "${RED}[-] All BloodHound-python attempts failed!${NC}"
+    fi
+    return $status
+}
 
-echo -e "\n${GREEN}[+] Starting Active Directory reconnaissance${NC}"
+# ======================== #
+#        RUSTHOUND         #
+# ======================== #
+try_rusthound() {
+    local status=1
+    declare -a rh_commands=(
+        "-f $dc_hostname -i $dc_ip -o $output_dir -z --adcs --fqdn-resolver"
+        "-f $dc_hostname -i $dc_ip -o $output_dir -z --adcs --fqdn-resolver --dns-tcp"
+        "-f $dc_hostname -i $dc_ip -o $output_dir -z --adcs --fqdn-resolver --ldaps"
+        "-f $dc_hostname -i $dc_ip -o $output_dir -z --adcs --fqdn-resolver --kerberos"
+        "-f $dc_hostname -i $dc_ip -o $output_dir -z --dc-only --dns-tcp"
+        "-f $dc_hostname -i $dc_ip -o $output_dir -z --adcs -P 3268"
+    )
+    for ((i=0; i<${#rh_commands[@]}; i++)); do
+        echo -e "${YELLOW}\n[*] Attempt $((i+1))/${#rh_commands[@]}: rusthound -d '$domain' -u '$username@$domain' -p '***' ${rh_commands[$i]}${NC}"
+        if rusthound -d "$domain" -u "$username@$domain" -p "$password" ${rh_commands[$i]} | tee "$output_dir/rusthound_attempt_$((i+1)).out"; then
+            status=0
+            echo -e "${GREEN}[+] RustHound collection succeeded${NC}"
+            break
+        else
+            echo -e "${RED}[!] Attempt $((i+1)) failed${NC}"
+        fi
+        sleep $((i*3+2))
+    done
+    if [ $status -ne 0 ]; then
+        echo -e "${RED}[-] All RustHound attempts failed!${NC}"
+    fi
+    return $status
+}
 
-echo -e "\n${YELLOW}[*] Running BloodHound-python...${NC}"
-bloodhound-python -u "$username" -p "$password" -d "$domain" \
--c All \
--ns "$dc_ip" \
--dc "$dc_hostname" \
---zip \
---disable-autogc \
---auth-method ntlm \
-| tee "$output_dir/bloodhound_python.out"
+# ======================== #
+#     LDAPDOMAIN DUMP      #
+# ======================== #
+try_ldapdomaindump() {
+    local status=1
+    declare -a ldd_commands=(
+        "--user \"$domain\\\\$username\" --password \"$password\" -o \"$output_dir\" \"$dc_hostname\""
+        "--user \"$domain\\\\$username\" --password \"$password\" -o \"$output_dir\" -n $dc_ip \"$dc_hostname\""
+        "--user \"$domain\\\\$username\" --password \"$password\" -o \"$output_dir\" --authtype SIMPLE \"$dc_hostname\""
+        "--user \"$domain\\\\$username\" --password \"$password\" -o \"$output_dir\" -n $dc_ip -r \"$dc_hostname\""
+        "--user \"$domain\\\\$username\" --password \"$password\" -o \"$output_dir\" --no-html --no-grep \"$dc_hostname\""
+        "--user \"$domain\\\\$username\" --password \"$password\" -o \"$output_dir\" --minimal \"$dc_hostname\""
+    )
+    for ((i=0; i<${#ldd_commands[@]}; i++)); do
+        cleaned_command=$(echo "${ldd_commands[$i]}" | sed "s/--password \\\"$password\\\"/--password '***'/g")
+        echo -e "${YELLOW}\n[*] Attempt $((i+1))/${#ldd_commands[@]}: ldapdomaindump $cleaned_command${NC}"
+        if eval ldapdomaindump ${ldd_commands[$i]} | tee "$output_dir/ldap_attempt_$((i+1)).out"; then
+            status=0
+            echo -e "${GREEN}[+] ldapdomaindump collection succeeded${NC}"
+            break
+        else
+            echo -e "${RED}[!] Attempt $((i+1)) failed${NC}"
+        fi
+        sleep $((i*3+2))
+    done
+    if [ $status -ne 0 ]; then
+        echo -e "${RED}[-] All ldapdomaindump attempts failed!${NC}"
+    fi
+    return $status
+}
 
-echo -e "\n${YELLOW}[*] Running RustHound...${NC}"
-rusthound \
--d "$domain" \
--u "$username@$domain" \
--p "$password" \
--f "$dc_hostname" \
--i "$dc_ip" \
--o "$output_dir" \
--z \
---adcs \
---fqdn-resolver \
-| tee "$output_dir/rusthound.out"
+# ======================== #
+#       MAIN FLOW          #
+# ======================== #
+echo -e "${GREEN}\n[+] Starting Active Directory reconnaissance${NC}"
 
-echo -e "\n${YELLOW}[*] Running ldapdomaindump...${NC}"
-ldapdomaindump \
---user "$domain\\$username" \
---password "$password" \
--o "$output_dir" \
-"$dc_hostname" \
-| tee "$output_dir/ldapdomaindump.out"
+try_bloodhound || true
+try_rusthound || true
+try_ldapdomaindump || true
+
+echo -e "${GREEN}\n[+] Collection complete. Output saved to: $output_dir${NC}"
